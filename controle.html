@@ -1,0 +1,241 @@
+<!doctype html>
+<html lang="pt-br">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1,user-scalable=no,viewport-fit=cover">
+<meta name="theme-color" content="#111111">
+<meta name="mobile-web-app-capable" content="yes">
+<title>Carrinho</title>
+<style>
+  :root { --fundo:#111; --botao:#262626; --borda:#3a3a3a; --ativo:#2e7d32; --parar:#b71c1c;
+          --texto:#eee; --azul:#1976d2; }
+  * { box-sizing:border-box; }
+  html, body { margin:0; height:100%; background:var(--fundo); color:var(--texto);
+    font-family:system-ui, sans-serif; user-select:none; -webkit-user-select:none;
+    touch-action:none; -webkit-tap-highlight-color:transparent; overflow:hidden; }
+
+  main { height:100%; display:grid; padding:max(14px, env(safe-area-inset-top)) 14px 14px;
+    grid-template-columns:1fr 1fr; grid-template-rows:auto 1fr;
+    grid-template-areas:"topo topo" "acel vira"; gap:14px; }
+
+  .topo { grid-area:topo; display:flex; flex-direction:column; align-items:center; gap:8px; }
+  h1 { font-size:20px; margin:0; }
+  #conectar { width:100%; max-width:320px; padding:12px; font-size:17px; border:none;
+    border-radius:12px; background:var(--azul); color:#fff; }
+  #conectar.ok { background:#333; }
+  #status { font-size:13px; opacity:.75; min-height:1.2em; text-align:center; }
+  #acao { font-size:22px; font-weight:600; min-height:1.3em; letter-spacing:.5px; }
+
+  .grupo { display:flex; gap:12px; }
+  .acel { grid-area:acel; flex-direction:column; }
+  .vira { grid-area:vira; flex-direction:row; }
+  .grupo button { flex:1 1 0; border:2px solid var(--borda); border-radius:22px;
+    background:var(--botao); color:#fff; font-size:46px; min-height:90px;
+    font-family:system-ui, sans-serif; font-variant-emoji:text; }
+  .grupo button.ativo { background:var(--ativo); border-color:#4caf50; transform:scale(.97); }
+  button:disabled { opacity:.3; }
+  #ataque { width:100%; max-width:320px; padding:16px; font-size:20px; font-weight:700;
+    letter-spacing:1px; border:2px solid #ff7043; border-radius:16px; background:#4e1a0c; color:#fff; }
+  #ataque.ativo { background:#e64a19; transform:scale(.97); }
+  #girar { font-size:13px; color:#ffb74d; text-align:center; }
+  @media (orientation: landscape) { #girar { display:none; } }
+
+  /* Celular deitado: aceleração à esquerda, direção à direita, status no meio */
+  @media (orientation: landscape) {
+    main { grid-template-columns:1fr minmax(180px, .8fr) 1fr; grid-template-rows:1fr;
+      grid-template-areas:"acel topo vira"; padding:14px max(14px, env(safe-area-inset-left)); }
+    .topo { justify-content:center; }
+  }
+</style>
+</head>
+<body>
+<main>
+  <div class="topo">
+    <h1>🚗 Carrinho</h1>
+    <button id="conectar">Conectar via Bluetooth</button>
+    <div id="status">desconectado</div>
+    <div id="acao"></div>
+    <button id="ataque">⚔ ATAQUE</button>
+    <div id="girar">↻ Deite o celular para dirigir melhor</div>
+  </div>
+
+  <div class="grupo acel">
+    <button data-k="cima">▲&#xFE0E;</button>
+    <button data-k="baixo">▼&#xFE0E;</button>
+  </div>
+  <div class="grupo vira">
+    <button data-k="esq">◀&#xFE0E;</button>
+    <button data-k="dir">▶&#xFE0E;</button>
+  </div>
+</main>
+
+<script>
+const UUID_SERVICO = "6e400001-b5a3-f393-e0a9-e50e24dcca9e";
+const UUID_RX      = "6e400002-b5a3-f393-e0a9-e50e24dcca9e";
+const REPETIR_MS   = 150;   // o Pi para sozinho se ficar 0,6 s sem comando
+
+const $ = s => document.querySelector(s);
+const status = $("#status"), acao = $("#acao"), btnCon = $("#conectar");
+const botoes = [...document.querySelectorAll(".grupo button")];
+
+let dispositivo = null, rx = null;
+let ocupado = false, pendente = null;   // fila de 1 posição: só vale o comando mais recente
+let atual = "S", timer = null;
+const toques = new Map();               // pointerId -> tecla (permite 2 dedos ao mesmo tempo)
+const teclado = new Set();
+
+// (acelerador, direção) -> comando do carrinho
+const MAPA = { "1,0":"F", "-1,0":"B", "0,-1":"L", "0,1":"R",
+               "1,-1":"G", "1,1":"I", "-1,-1":"H", "-1,1":"J", "0,0":"S" };
+const NOMES = { F:"▲ frente", B:"▼ ré", L:"⟲ gira esq.", R:"⟳ gira dir.",
+                G:"↖ curva esq.", I:"↗ curva dir.", H:"↙ ré esq.", J:"↘ ré dir.", S:"" };
+
+const btnAtaque = $("#ataque");
+function habilitar(on) { [...botoes, btnAtaque].forEach(b => b.disabled = !on); }
+habilitar(false);
+
+if (!navigator.bluetooth) {
+  status.textContent = "Este navegador não tem Web Bluetooth. Use o Chrome no Android (página em https).";
+  btnCon.disabled = true;
+}
+
+// ---------- conexão ----------
+btnCon.onclick = async () => {
+  if (dispositivo?.gatt.connected) { dispositivo.gatt.disconnect(); return; }
+  try {
+    status.textContent = "procurando...";
+    dispositivo = await navigator.bluetooth.requestDevice({
+      filters: [{ services: [UUID_SERVICO] }, { namePrefix: "Carrinho" }],
+      optionalServices: [UUID_SERVICO],
+    });
+    dispositivo.addEventListener("gattserverdisconnected", aoDesconectar);
+    status.textContent = "conectando...";
+    const servidor = await dispositivo.gatt.connect();
+    const servico = await servidor.getPrimaryService(UUID_SERVICO);
+    rx = await servico.getCharacteristic(UUID_RX);
+    status.textContent = "conectado: " + (dispositivo.name || "Carrinho");
+    btnCon.textContent = "Desconectar";
+    btnCon.classList.add("ok");
+    habilitar(true);
+    modoDirecao();
+  } catch (e) {
+    status.textContent = "erro: " + e.message;
+  }
+};
+
+function aoDesconectar() {
+  rx = null; toques.clear(); teclado.clear(); atualizar(false); atacar(false, false);
+  habilitar(false);
+  btnCon.textContent = "Conectar via Bluetooth";
+  btnCon.classList.remove("ok");
+  status.textContent = "desconectado";
+  liberarTela();
+}
+
+// ---------- modo demonstração (sem Pi): abra controle.html?demo ----------
+const DEMO = new URLSearchParams(location.search).has("demo");
+if (DEMO) {
+  rx = { writeValueWithoutResponse: async d => { status.textContent = "DEMO · enviado: " + new TextDecoder().decode(d); } };
+  status.textContent = "DEMO · sem Bluetooth";
+  btnCon.textContent = "Modo demonstração";
+  btnCon.disabled = true;
+  habilitar(true);
+}
+
+async function enviar(txt) {
+  if (!rx) return;
+  if (ocupado) { pendente = txt; return; }
+  ocupado = true;
+  try {
+    const dados = new TextEncoder().encode(txt);
+    if (rx.writeValueWithoutResponse) await rx.writeValueWithoutResponse(dados);
+    else await rx.writeValue(dados);
+  } catch (e) {
+    status.textContent = "falha ao enviar: " + e.message;
+  }
+  ocupado = false;
+  if (pendente !== null) { const p = pendente; pendente = null; enviar(p); }
+}
+
+// ---------- tela cheia, deitado e sem apagar ----------
+let wakeLock = null;
+async function modoDirecao() {
+  try { await document.documentElement.requestFullscreen(); } catch {}
+  try { await screen.orientation.lock("landscape"); } catch {}
+  try { wakeLock = await navigator.wakeLock.request("screen"); } catch {}
+}
+function liberarTela() {
+  try { wakeLock?.release(); } catch {}
+  wakeLock = null;
+  if (document.fullscreenElement) document.exitFullscreen().catch(() => {});
+}
+
+// ---------- direção ----------
+function comandoAtual() {
+  const ativas = new Set([...toques.values(), ...teclado]);
+  const acel = ativas.has("cima") && !ativas.has("baixo") ? 1 : ativas.has("baixo") && !ativas.has("cima") ? -1 : 0;
+  const vira = ativas.has("esq") && !ativas.has("dir") ? -1 : ativas.has("dir") && !ativas.has("esq") ? 1 : 0;
+  return { cmd: MAPA[`${acel},${vira}`], ativas };
+}
+
+function atualizar(mandar = true) {
+  const { cmd, ativas } = comandoAtual();
+  botoes.forEach(b => b.classList.toggle("ativo", ativas.has(b.dataset.k)));
+  acao.textContent = NOMES[cmd];
+  if (cmd === atual) return;
+  if (cmd !== "S" && navigator.vibrate) navigator.vibrate(12);
+  atual = cmd;
+  if (mandar) enviar(cmd);
+  clearInterval(timer); timer = null;
+  if (cmd !== "S") timer = setInterval(() => enviar(atual), REPETIR_MS);
+}
+
+botoes.forEach(b => {
+  b.addEventListener("pointerdown", e => {
+    e.preventDefault();
+    try { b.setPointerCapture(e.pointerId); } catch {}
+    toques.set(e.pointerId, b.dataset.k); atualizar();
+  });
+  const soltar = e => { toques.delete(e.pointerId); atualizar(); };
+  b.addEventListener("pointerup", soltar);
+  b.addEventListener("pointercancel", soltar);
+  b.addEventListener("contextmenu", e => e.preventDefault());
+});
+
+// ---------- arma: segura = ataque (x), solta = recolhe (b) ----------
+let atacando = false;
+function atacar(on, mandar = true) {
+  if (on === atacando) return;
+  atacando = on;
+  btnAtaque.classList.toggle("ativo", on);
+  if (on && navigator.vibrate) navigator.vibrate(40);
+  if (mandar) enviar(on ? "x" : "b");
+}
+btnAtaque.addEventListener("pointerdown", e => {
+  e.preventDefault();
+  try { btnAtaque.setPointerCapture(e.pointerId); } catch {}
+  atacar(true);
+});
+btnAtaque.addEventListener("pointerup", () => atacar(false));
+btnAtaque.addEventListener("pointercancel", () => atacar(false));
+btnAtaque.addEventListener("contextmenu", e => e.preventDefault());
+
+// Teclado (para testar no PC): setas ou WASD, espaço = ataque
+const TECLAS = { ArrowUp:"cima", w:"cima", ArrowDown:"baixo", s:"baixo",
+                 ArrowLeft:"esq", a:"esq", ArrowRight:"dir", d:"dir" };
+document.addEventListener("keydown", e => {
+  if (e.key === " ") { e.preventDefault(); if (rx) atacar(true); return; }
+  const k = TECLAS[e.key]; if (k && !teclado.has(k)) { teclado.add(k); atualizar(); }
+});
+document.addEventListener("keyup", e => {
+  if (e.key === " ") { atacar(false); return; }
+  const k = TECLAS[e.key]; if (k) { teclado.delete(k); atualizar(); }
+});
+
+// Se o app for para segundo plano, para o carrinho e recolhe a arma
+document.addEventListener("visibilitychange", () => {
+  if (document.hidden) { toques.clear(); teclado.clear(); atualizar(); atacar(false); }
+});
+</script>
+</body>
+</html>
