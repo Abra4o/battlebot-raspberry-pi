@@ -11,6 +11,88 @@ mesma ponte H L298N, mesmo servo de ataque, mesma velocidade e as mesmas letras 
 | `controle.html` | Controle do celular (Chrome no Android, via Bluetooth BLE) |
 | `simulador_pc.py` | Visual no PC: o robô anda e ataca na tela, sem precisar do Pi |
 | `teste_pc.py` | Teste automático da lógica no PC |
+| `abrir_controle_demo.bat` | Abre o controle do celular no PC, em modo demonstração |
+
+**Passo a passo:** [💻 PC](#-passo-a-passo-no-pc-windows) · [📱 Celular](#-passo-a-passo-no-celular-android) · [🍓 Raspberry Pi](#-raspberry-pi-instalar)
+
+---
+
+## 💻 Passo a passo no PC (Windows)
+
+No PC dá para ver o robô andando, testar o controle e rodar os testes, **sem o Raspberry Pi**.
+
+### 1. Instalar o Python (só na primeira vez)
+1. Baixe em https://www.python.org/downloads/ (3.10 ou mais novo).
+2. Na instalação, marque **"Add python.exe to PATH"**.
+3. Confira no PowerShell: `python --version`
+
+### 2. Baixar o projeto
+Com o Git:
+```powershell
+gh repo clone Abra4o/battlebot-raspberry-pi
+cd battlebot-raspberry-pi
+```
+Ou no GitHub: botão verde **Code → Download ZIP**, extraia e abra o PowerShell dentro da pasta
+(na pasta, clique com o botão direito → **Abrir no Terminal**).
+
+### 3. Criar o ambiente e instalar a biblioteca (só na primeira vez)
+```powershell
+python -m venv venv
+.\venv\Scripts\Activate.ps1
+pip install gpiozero
+```
+Se der erro de "execução de scripts desabilitada", rode uma vez
+`Set-ExecutionPolicy -Scope CurrentUser RemoteSigned` e ative de novo.
+Quando ativado, aparece `(venv)` no começo da linha.
+
+### 4. Rodar
+Sempre ative o ambiente antes: `.\venv\Scripts\Activate.ps1`
+
+| O que | Comando | Como usar |
+|-------|---------|-----------|
+| Simulador (robô na tela) | `python simulador_pc.py` | Setas ou WASD movem (duas juntas = curva), **espaço** = ataque |
+| Testes automáticos | `python teste_pc.py` | Tem que terminar com `RESULTADO: TUDO OK` |
+| Controle do celular no PC | dois cliques em `abrir_controle_demo.bat` | Clique nos botões ou use setas/espaço; aparece a letra enviada |
+
+Dica: no controle aberto no Chrome, aperte **F12** e depois **Ctrl+Shift+M** para ver no tamanho de celular.
+
+---
+
+## 📱 Passo a passo no celular (Android)
+
+Escolha **um** dos dois apps. iPhone não funciona com nenhum dos dois.
+
+### Opção A: app roboBT (o app do projeto original)
+Use com o Pi rodando `--uart` (HC-06) ou `--serial` (Bluetooth do Pi).
+1. Baixe o APK **roboBT** indicado na
+   [página do projeto](https://roboticapratica.com.br/projeto/battlebot-arduino.html).
+2. Abra o APK e permita **"Instalar apps desconhecidos"** quando o Android pedir.
+3. Ligue o robô e rode o `app.py` no Pi (veja [Raspberry Pi: rodar](#-raspberry-pi-rodar)).
+4. No celular: **Configurações → Bluetooth → Parear novo dispositivo**:
+   - modo `--uart`: escolha **HC-06** (senha **1234**);
+   - modo `--serial`: escolha o **Raspberry Pi** (`raspberrypi`) e confirme o código nos dois lados.
+5. Abra o roboBT, conecte no dispositivo pareado e dirija.
+
+### Opção B: controle novo (`controle.html`), sem instalar nada
+Use com o Pi rodando `sudo python3 app.py` (modo BLE).
+1. **Colocar o controle na internet** (só uma vez). O Chrome só libera Bluetooth em página https:
+   1. No PC, copie o `controle.html` para uma pasta nova e renomeie a cópia para `index.html`.
+   2. Entre em https://app.netlify.com/drop (é grátis) e arraste essa pasta.
+   3. Ele gera um link `https://...netlify.app`. Guarde esse link.
+2. No celular, ative **Bluetooth** e **Localização**.
+3. Abra o link no **Chrome**.
+4. Menu **⋮ → Adicionar à tela inicial**. Vira um ícone, como um app.
+5. Ligue o robô e rode `sudo python3 app.py` no Pi.
+6. Abra o ícone → **Conectar via Bluetooth** → escolha **Carrinho** → **Parear**.
+7. A tela fica cheia e deitada. Dirija:
+   - polegar esquerdo **▲ / ▼**, polegar direito **◀ ▶** (juntos = curva andando);
+   - **⚔ ATAQUE** no meio: segurou = ataca, soltou = recolhe;
+   - soltou as setas, desconectou ou saiu do app = o robô para.
+
+Para testar só a tela no celular, sem o robô, abra o link com `?demo` no final
+(ex.: `https://seu-site.netlify.app/?demo`).
+
+---
 
 ## Ligações: Arduino → Raspberry Pi (numeração BCM)
 
@@ -49,17 +131,11 @@ Ative o UART: `sudo raspi-config` → Interface Options → Serial Port →
 
 ---
 
-## 1. Testar no PC (sem o Pi)
-```powershell
-python -m venv venv
-.\venv\Scripts\Activate.ps1
-pip install gpiozero
-python simulador_pc.py   # setas/WASD movem, espaço = ataque
-python teste_pc.py       # teste automático
-```
-
-## 2. Instalar no Raspberry Pi
+## 🍓 Raspberry Pi: instalar
 ```bash
+gh auth login                                  # só na primeira vez (repositório privado)
+gh repo clone Abra4o/battlebot-raspberry-pi
+cd battlebot-raspberry-pi
 sudo apt update
 sudo apt install -y python3-gpiozero python3-serial python3-dbus python3-gi bluez pigpio python3-pigpio
 sudo systemctl enable --now pigpiod
@@ -68,7 +144,8 @@ sudo pip3 install bluezero --break-system-packages
 O `pigpio` deixa o servo firme (sem tremer). Para usar, rode com
 `sudo GPIOZERO_PIN_FACTORY=pigpio python3 app.py ...`.
 
-## 3. Rodar: escolha o modo
+## 🍓 Raspberry Pi: rodar
+Escolha o modo de acordo com o app do celular:
 
 | Modo | Comando | Celular |
 |------|---------|---------|
@@ -88,15 +165,6 @@ sudo sdptool add SP
 sudo sed -i 's|^ExecStart=.*bluetoothd.*|& --experimental|' /lib/systemd/system/bluetooth.service
 sudo systemctl daemon-reload && sudo systemctl restart bluetooth
 ```
-O Web Bluetooth só funciona em página **https**: arraste o `controle.html` (renomeado para
-`index.html`) em https://app.netlify.com/drop, abra o link no Chrome do celular →
-⋮ → **Adicionar à tela inicial**.
-
-### controle.html
-- Celular deitado: polegar esquerdo **▲ / ▼**, polegar direito **◀ ▶**, **⚔ ATAQUE** no meio.
-- ▲ + ▶ juntos = curva andando. Só ◀ ou ▶ = gira no lugar.
-- Segurou ATAQUE = servo vai a 180°; soltou = volta a 130°.
-- Soltou as setas, desconectou, saiu do app ou ficou 0,6 s sem comando = para.
 
 ## Comandos (1 caractere cada)
 | App roboBT | controle.html | Ação |
@@ -123,4 +191,4 @@ O Web Bluetooth só funciona em página **https**: arraste o `controle.html` (re
 
 ## Iniciar junto com o Pi
 `sudo crontab -e` e adicione (troque `--uart` pelo seu modo):
-`@reboot sleep 10 && GPIOZERO_PIN_FACTORY=pigpio python3 /home/pi/carrinho-raspi/app.py --uart`
+`@reboot sleep 10 && GPIOZERO_PIN_FACTORY=pigpio python3 /home/pi/battlebot-raspberry-pi/app.py --uart`
