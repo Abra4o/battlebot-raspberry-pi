@@ -1,10 +1,10 @@
 """
-BattleBot controlado pelo celular via Bluetooth - Raspberry Pi + L298N + servo (arma)
+BattleBot controlado pelo celular - Raspberry Pi + L298N + servo (arma)
 Versão para Raspberry Pi do projeto:
 https://roboticapratica.com.br/projeto/battlebot-arduino.html
 
 Modos de conexão:
-  sudo python3 app.py           BLE: o celular abre o controle.html no Chrome
+  sudo python3 app.py           Wi-Fi: o celular abre http://<ip do Pi> no navegador
   sudo python3 app.py --uart    módulo HC-06 ligado no UART do Pi (app roboBT do projeto)
   sudo python3 app.py --serial  Bluetooth do próprio Pi, sem HC-06 (app roboBT do projeto)
 
@@ -13,10 +13,13 @@ Comandos (1 caractere cada):
   controle.html: F B L R S + diagonais G/I (frente-esq/dir) e H/J (ré-esq/dir), x / b
 A velocidade é fixa (VELOCIDADE).
 """
+import os
 import socket
+import subprocess
 import sys
 import threading
 import time
+from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 
 from gpiozero import AngularServo, Motor, Robot
 
@@ -33,17 +36,16 @@ ARMA_ATAQUE = 180
 # Velocidade fixa dos motores (0.0 a 1.0). O projeto Arduino usa 120 de 255.
 VELOCIDADE = 120 / 255
 
-NOME_BLE = "Carrinho"
-# Nordic UART Service: o celular escreve os comandos na característica RX
-UUID_SERVICO = "6e400001-b5a3-f393-e0a9-e50e24dcca9e"
-UUID_RX = "6e400002-b5a3-f393-e0a9-e50e24dcca9e"
+# Wi-Fi: o Pi serve o controle.html e recebe os comandos em POST /cmd
+PORTA_WIFI = 80
+PAGINA = os.path.join(os.path.dirname(os.path.abspath(__file__)), "controle.html")
 
 CANAL_RFCOMM = 1
 PORTA_UART = "/dev/serial0"
 BAUD_UART = 9600     # padrão do HC-06
 
 # Para o carrinho se ficar esse tempo sem receber comando (None = desativado).
-# O controle.html repete o comando a cada 150 ms, então no modo BLE fica ativado.
+# O controle.html repete o comando a cada 150 ms, então no modo Wi-Fi fica ativado.
 # O app roboBT manda o comando só uma vez, então nos outros modos fica desativado.
 TIMEOUT_S = None
 
@@ -87,6 +89,7 @@ def processar(c):
     with trava:
         if c in ARMA:
             mover_arma(ARMA[c])
+            estado["ultimo"] = time.time()
         elif c in MOVIMENTOS:
             estado["cmd"] = c
             estado["ultimo"] = time.time()
@@ -95,7 +98,7 @@ def processar(c):
 
 
 def receber(dados):
-    """Trata um bloco de bytes (lista de ints ou bytes) recebido do celular."""
+    """Trata um bloco de bytes recebido do celular."""
     for c in bytes(dados).decode("ascii", "ignore"):
         processar(c)
 
@@ -124,28 +127,58 @@ def atender(conn):
 
 
 def watchdog():
+    """Sem comando há TIMEOUT_S (Wi-Fi caiu, controle fechado): para e recolhe a arma."""
     while True:
-        if TIMEOUT_S is not None:
-            with trava:
-                if estado["cmd"] != "S" and time.time() - estado["ultimo"] > TIMEOUT_S:
-                    estado["cmd"] = "S"
-                    robo.stop()
+        if (TIMEOUT_S is not None and time.time() - estado["ultimo"] > TIMEOUT_S
+                and (estado["cmd"] != "S" or estado["arma"] != ARMA_REPOUSO)):
+            parar()
         time.sleep(0.1)
 
 
-def rodar_ble():
-    from bluezero import adapter, peripheral
+class Controle(BaseHTTPRequestHandler):
+    """Entrega o controle.html e recebe os comandos do celular pela rede Wi-Fi."""
+    protocol_version = "HTTP/1.1"  # mantém a conexão aberta entre um comando e outro
 
-    endereco = list(adapter.Adapter.available())[0].address
-    p = peripheral.Peripheral(endereco, local_name=NOME_BLE)
-    p.add_service(srv_id=1, uuid=UUID_SERVICO, primary=True)
-    p.add_characteristic(srv_id=1, chr_id=1, uuid=UUID_RX, value=[], notifying=False,
-                         flags=["write", "write-without-response"],
-                         write_callback=lambda valor, opcoes: receber(valor))
-    p.on_connect = lambda *_: print("Conectado")
-    p.on_disconnect = lambda *_: (parar(), print("Desconectado"))
-    print(f"Anunciando BLE como '{NOME_BLE}'...")
-    p.publish()  # fica rodando até Ctrl+C
+    def do_GET(self):
+        if self.path.split("?")[0] not in ("/", "/index.html", "/controle.html"):
+            self.responder(404)
+            return
+        with open(PAGINA, "rb") as f:
+            self.responder(200, f.read(), "text/html; charset=utf-8")
+
+    def do_POST(self):
+        if self.path != "/cmd":
+            self.responder(404)
+            return
+        receber(self.rfile.read(int(self.headers.get("Content-Length", 0))))
+        self.responder(204)
+
+    def responder(self, codigo, corpo=b"", tipo="text/plain"):
+        self.send_response(codigo)
+        self.send_header("Content-Type", tipo)
+        self.send_header("Content-Length", str(len(corpo)))
+        self.send_header("Cache-Control", "no-store")
+        self.end_headers()
+        self.wfile.write(corpo)
+
+    def log_message(self, *_):
+        pass  # não imprime cada comando
+
+
+def rodar_wifi():
+    srv = ThreadingHTTPServer(("", PORTA_WIFI), Controle)
+    try:
+        ips = subprocess.run(["hostname", "-I"], capture_output=True, text=True).stdout.split()
+    except OSError:
+        ips = []
+    porta = "" if PORTA_WIFI == 80 else f":{PORTA_WIFI}"
+    print("Controle no Wi-Fi. No celular, abra:")
+    for ip in ips or ["<ip do Pi>"]:
+        print(f"  http://{ip}{porta}")
+    try:
+        srv.serve_forever()
+    finally:
+        srv.server_close()
 
 
 def rodar_serial():
@@ -181,7 +214,7 @@ def main():
     elif "--serial" in sys.argv:
         rodar = rodar_serial
     else:
-        rodar = rodar_ble
+        rodar = rodar_wifi
         if TIMEOUT_S is None:
             TIMEOUT_S = 0.6
     threading.Thread(target=watchdog, daemon=True).start()

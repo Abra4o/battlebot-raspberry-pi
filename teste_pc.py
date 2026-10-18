@@ -1,9 +1,11 @@
-"""Teste do app.py com pinos simulados e uma conexão falsa no lugar do Bluetooth."""
+"""Teste do app.py com pinos simulados, uma conexão falsa no lugar do Bluetooth e o servidor Wi-Fi local."""
 import os
 import socket
 import sys
 import threading
 import time
+import urllib.request
+from http.server import ThreadingHTTPServer
 
 from gpiozero import Device
 from gpiozero.pins.mock import MockFactory, MockPWMPin
@@ -108,6 +110,29 @@ enviar("b")
 pulso = round(pin(app.PINO_ARMA).state * 20, 2)
 resultado("servo 130° = pulso ~1,94 ms", pulso == 1.94, 1.94, pulso)
 
+print("-- Wi-Fi --")
+srv = ThreadingHTTPServer(("127.0.0.1", 0), app.Controle)
+threading.Thread(target=srv.serve_forever, daemon=True).start()
+url = f"http://127.0.0.1:{srv.server_address[1]}"
+
+
+def post(txt):
+    req = urllib.request.Request(url + "/cmd", data=txt.encode(), method="POST")
+    with urllib.request.urlopen(req) as r:
+        return r.status
+
+
+pagina = urllib.request.urlopen(url + "/").read().decode()
+resultado("GET / entrega o controle.html", "<title>Carrinho</title>" in pagina, "controle.html", pagina[:15])
+resultado("POST /cmd responde 204", post("G") == 204, 204, "204" if motores() == (C, V) else "?")
+checar("Wi-Fi: G = curva frente-esquerda", (C, V))
+post("Sx")
+checar("Wi-Fi: 'Sx' para", (0.0, 0.0))
+checar_arma("Wi-Fi: 'Sx' ataca", 180)
+post("b")
+checar_arma("Wi-Fi: b recolhe", 130)
+srv.shutdown()
+
 print("-- segurança --")
 enviar("x")
 celular.close()
@@ -115,16 +140,19 @@ t.join(1)
 checar("desconectou -> para", (0.0, 0.0))
 checar_arma("desconectou -> recolhe arma", 130)
 
-app.receber([ord("I")])
-checar("BLE: 'I' em lista de ints", (V, C))
-app.receber(b"F"); app.parar("adaptador", "celular")
-checar("BLE: desconexão -> para", (0.0, 0.0))
+app.receber(b"I")
+checar("receber: 'I' em bytes", (V, C))
+app.receber(b"F"); app.parar()
+checar("parar() -> para", (0.0, 0.0))
 
 app.TIMEOUT_S = 0.3
 threading.Thread(target=app.watchdog, daemon=True).start()
 app.processar("F")
 time.sleep(0.6)
 checar("watchdog para sem comandos", (0.0, 0.0))
+app.processar("x")
+time.sleep(0.6)
+checar_arma("watchdog recolhe a arma sem comandos", 130)
 
 print("\nRESULTADO:", "TUDO OK" if falhas == 0 else f"{falhas} falha(s)")
 sys.exit(1 if falhas else 0)
