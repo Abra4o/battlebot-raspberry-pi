@@ -52,7 +52,7 @@
 <main>
   <div class="topo">
     <h1>🚗 Carrinho</h1>
-    <button id="conectar">Conectar via Bluetooth</button>
+    <button id="conectar">▶ Dirigir</button>
     <div id="status">desconectado</div>
     <div id="acao"></div>
     <button id="ataque">⚔ ATAQUE</button>
@@ -70,16 +70,15 @@
 </main>
 
 <script>
-const UUID_SERVICO = "6e400001-b5a3-f393-e0a9-e50e24dcca9e";
-const UUID_RX      = "6e400002-b5a3-f393-e0a9-e50e24dcca9e";
-const REPETIR_MS   = 150;   // o Pi para sozinho se ficar 0,6 s sem comando
+const REPETIR_MS = 150;   // o Pi para sozinho se ficar 0,6 s sem comando
+const ESPERA_MS  = 1000;  // desiste de um comando que não chegou nesse tempo
 
 const $ = s => document.querySelector(s);
 const status = $("#status"), acao = $("#acao"), btnCon = $("#conectar");
 const botoes = [...document.querySelectorAll(".grupo button")];
 
-let dispositivo = null, rx = null;
-let ocupado = false, pendente = null;   // fila de 1 posição: só vale o comando mais recente
+let ligado = false, online = null;
+let ocupado = false, pendente = null;   // comandos que chegaram enquanto outro estava indo
 let atual = "S", timer = null;
 const toques = new Map();               // pointerId -> tecla (permite 2 dedos ao mesmo tempo)
 const teclado = new Set();
@@ -94,65 +93,63 @@ const btnAtaque = $("#ataque");
 function habilitar(on) { [...botoes, btnAtaque].forEach(b => b.disabled = !on); }
 habilitar(false);
 
-if (!navigator.bluetooth) {
-  status.textContent = "Este navegador não tem Web Bluetooth. Use o Chrome no Android (página em https).";
-  btnCon.disabled = true;
-}
-
-// ---------- conexão ----------
-btnCon.onclick = async () => {
-  if (dispositivo?.gatt.connected) { dispositivo.gatt.disconnect(); return; }
+// ---------- conexão Wi-Fi: esta página é servida pelo próprio Pi ----------
+let transmitir = async txt => {
+  const ctl = new AbortController();
+  const t = setTimeout(() => ctl.abort(), ESPERA_MS);
   try {
-    status.textContent = "procurando...";
-    dispositivo = await navigator.bluetooth.requestDevice({
-      filters: [{ services: [UUID_SERVICO] }, { namePrefix: "Carrinho" }],
-      optionalServices: [UUID_SERVICO],
-    });
-    dispositivo.addEventListener("gattserverdisconnected", aoDesconectar);
-    status.textContent = "conectando...";
-    const servidor = await dispositivo.gatt.connect();
-    const servico = await servidor.getPrimaryService(UUID_SERVICO);
-    rx = await servico.getCharacteristic(UUID_RX);
-    status.textContent = "conectado: " + (dispositivo.name || "Carrinho");
-    btnCon.textContent = "Desconectar";
-    btnCon.classList.add("ok");
-    habilitar(true);
-    modoDirecao();
-  } catch (e) {
-    status.textContent = "erro: " + e.message;
-  }
+    const r = await fetch("/cmd", { method: "POST", body: txt, signal: ctl.signal });
+    if (!r.ok) throw new Error("HTTP " + r.status);
+  } finally { clearTimeout(t); }
 };
 
-function aoDesconectar() {
-  rx = null; toques.clear(); teclado.clear(); atualizar(false); atacar(false, false);
+let mostrarConexao = ok => {
+  if (ok === online) return;
+  online = ok;
+  status.textContent = ok ? "conectado ao carrinho" : "sem conexão com o carrinho (confira o Wi-Fi)";
+};
+
+function ligar() {
+  ligado = true; online = null;
+  status.textContent = "conectando...";
+  btnCon.textContent = "Parar";
+  btnCon.classList.add("ok");
+  habilitar(true);
+  atual = "S"; enviar("S");
+  // repete o comando atual (mesmo parado) para o Pi saber que o celular continua aí
+  timer = setInterval(() => { if (!ocupado) enviar(atual); }, REPETIR_MS);
+}
+
+function desligar() {
+  ligado = false;
+  clearInterval(timer); timer = null;
+  toques.clear(); teclado.clear(); atualizar(false); atacar(false, false);
+  transmitir("Sb").catch(() => {});
   habilitar(false);
-  btnCon.textContent = "Conectar via Bluetooth";
+  btnCon.textContent = "▶ Dirigir";
   btnCon.classList.remove("ok");
-  status.textContent = "desconectado";
+  status.textContent = "parado";
   liberarTela();
 }
+
+btnCon.onclick = () => { if (ligado) desligar(); else { ligar(); modoDirecao(); } };
 
 // ---------- modo demonstração (sem Pi): abra controle.html?demo ----------
 const DEMO = new URLSearchParams(location.search).has("demo");
 if (DEMO) {
-  rx = { writeValueWithoutResponse: async d => { status.textContent = "DEMO · enviado: " + new TextDecoder().decode(d); } };
-  status.textContent = "DEMO · sem Bluetooth";
+  transmitir = async txt => { status.textContent = "DEMO · enviado: " + txt; };
+  mostrarConexao = () => {};
+  ligar();
   btnCon.textContent = "Modo demonstração";
   btnCon.disabled = true;
-  habilitar(true);
 }
 
 async function enviar(txt) {
-  if (!rx) return;
-  if (ocupado) { pendente = txt; return; }
+  if (!ligado) return;
+  if (ocupado) { pendente = (pendente ?? "") + txt; return; }
   ocupado = true;
-  try {
-    const dados = new TextEncoder().encode(txt);
-    if (rx.writeValueWithoutResponse) await rx.writeValueWithoutResponse(dados);
-    else await rx.writeValue(dados);
-  } catch (e) {
-    status.textContent = "falha ao enviar: " + e.message;
-  }
+  try { await transmitir(txt); mostrarConexao(true); }
+  catch { mostrarConexao(false); }
   ocupado = false;
   if (pendente !== null) { const p = pendente; pendente = null; enviar(p); }
 }
@@ -186,8 +183,6 @@ function atualizar(mandar = true) {
   if (cmd !== "S" && navigator.vibrate) navigator.vibrate(12);
   atual = cmd;
   if (mandar) enviar(cmd);
-  clearInterval(timer); timer = null;
-  if (cmd !== "S") timer = setInterval(() => enviar(atual), REPETIR_MS);
 }
 
 botoes.forEach(b => {
@@ -224,7 +219,7 @@ btnAtaque.addEventListener("contextmenu", e => e.preventDefault());
 const TECLAS = { ArrowUp:"cima", w:"cima", ArrowDown:"baixo", s:"baixo",
                  ArrowLeft:"esq", a:"esq", ArrowRight:"dir", d:"dir" };
 document.addEventListener("keydown", e => {
-  if (e.key === " ") { e.preventDefault(); if (rx) atacar(true); return; }
+  if (e.key === " ") { e.preventDefault(); if (ligado) atacar(true); return; }
   const k = TECLAS[e.key]; if (k && !teclado.has(k)) { teclado.add(k); atualizar(); }
 });
 document.addEventListener("keyup", e => {
